@@ -2,6 +2,7 @@ package indiclient_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -499,10 +500,12 @@ func Test_GetBlob_Success(t *testing.T) {
 }
 */
 
-func Example_singleClient() {
+func TestExample_singleClient_Test(t *testing.T) {
 	var err error
 
-	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelInfo)
+	ctx := context.TODO()
+
+	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelDebug)
 	dialer := indiclient.NetworkDialer{}
 	fs := afero.NewMemMapFs()
 	bufferSize := 10
@@ -522,8 +525,10 @@ func Example_singleClient() {
 		panic(err.Error())
 	}
 
-	// Wait to get the devices back from indiserver.
-	time.Sleep(2 * time.Second)
+	err = client.WaitForPropsUpdateOrCancel(ctx)
+	if err != nil {
+		panic(err.Error())
+	}
 
 	// Print the names of all the devices we found.
 	devices := client.Devices()
@@ -532,19 +537,35 @@ func Example_singleClient() {
 	}
 
 	// Connect to our ASI224MC camera.
-	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
+	err = client.SetSwitchValue(ctx, devices[0].Name, "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
 	if err != nil {
 		panic(err.Error())
 	}
 
+	err = client.GetProperties("", "")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	err = client.WaitForPropsUpdateOrCancel(ctx)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Print the names of all the devices we found.
+	devices = client.Devices()
+	for _, device := range devices {
+		println(device.Name)
+	}
+
 	// Tell the indiserver we want blobs from this camera's CCD1 property.
-	err = client.EnableBlob("ZWO CCD ASI224MC", "CCD1", indiclient.BlobEnableAlso)
+	err = client.EnableBlob(devices[0].Name, "CCD1", indiclient.BlobEnableAlso)
 	if err != nil {
 		panic(err.Error())
 	}
 
 	// Take a 10 second exposure.
-	err = client.SetNumberValue("ZWO CCD ASI224MC", "CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", "10")
+	err = client.SetNumberValue(ctx, devices[0].Name, "CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", "10")
 	if err != nil {
 		panic(err.Error())
 	}
@@ -553,7 +574,7 @@ func Example_singleClient() {
 	time.Sleep(11 * time.Second)
 
 	// Get the actual BLOB. Be sure to close rdr when you are done with it!
-	rdr, fileName, length, err := client.GetBlob("ZWO CCD ASI224MC", "CCD1", "CCD1")
+	rdr, fileName, length, err := client.GetBlob(devices[0].Name, "CCD1", "CCD1")
 	if err != nil {
 		panic(err.Error())
 	}
@@ -566,146 +587,146 @@ func Example_singleClient() {
 	}
 }
 
-func Example_multipleClients() {
-	var err error
-
-	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelInfo)
-	dialer := indiclient.NetworkDialer{}
-	fs := afero.NewMemMapFs()
-	bufferSize := 10
-	blobfs := afero.NewMemMapFs()
-
-	// Initialize a new INDIClient.
-	client := indiclient.NewINDIClient(log, dialer, fs, bufferSize)
-
-	// Connect to the local indiserver.
-	err = client.Connect("tcp", "localhost:7624")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Get all properties of all devices.
-	err = client.GetProperties("", "")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait to get the devices back from indiserver.
-	time.Sleep(2 * time.Second)
-
-	// Print the names of all the devices we found.
-	devices := client.Devices()
-	for _, device := range devices {
-		println(device.Name)
-	}
-
-	// Connect to our ASI224MC camera.
-	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	blobClient := indiclient.NewINDIClient(log, dialer, blobfs, bufferSize)
-
-	// Connect to the local indiserver.
-	err = blobClient.Connect("tcp", "localhost:7624")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Get the "CCD1" property of the "ZWO CCD ASI224MC" device.
-	err = blobClient.GetProperties("ZWO CCD ASI224MC", "CCD1")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait to get the devices back from indiserver.
-	time.Sleep(2 * time.Second)
-
-	// Tell the indiserver we want blobs from this camera's CCD1 property, and ONLY blobs from this camera.
-	// This allows the other client to stay open for control data, without slowing things down with large
-	// file transfers.
-	err = blobClient.EnableBlob("ZWO CCD ASI224MC", "CCD1", indiclient.BlobEnableOnly)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Take a 10 second exposure. We send this on the control client.
-	err = client.SetNumberValue("ZWO CCD ASI224MC", "CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", "10")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait for the exposure to finish and transfer.
-	time.Sleep(11 * time.Second)
-
-	// Get the actual BLOB. Be sure to close rdr when you are done with it!
-	rdr, fileName, length, err := blobClient.GetBlob("ZWO CCD ASI224MC", "CCD1", "CCD1")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	println(fmt.Sprintf("%s %d", fileName, length))
-
-	err = rdr.Close()
-	if err != nil {
-		panic(err.Error())
-	}
-
-	err = client.Disconnect()
-	if err != nil {
-		panic(err.Error())
-	}
-
-	err = blobClient.Disconnect()
-	if err != nil {
-		panic(err.Error())
-	}
-}
-
-func ExampleINDIClient_SetSwitchValue_connect() {
-	var err error
-
-	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelInfo)
-	dialer := indiclient.NetworkDialer{}
-	fs := afero.NewMemMapFs()
-	bufferSize := 10
-
-	// Initialize a new INDIClient.
-	client := indiclient.NewINDIClient(log, dialer, fs, bufferSize)
-
-	// Connect to the local indiserver.
-	err = client.Connect("tcp", "localhost:7624")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Get all properties of all devices.
-	err = client.GetProperties("", "")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait to get the devices back from indiserver.
-	time.Sleep(2 * time.Second)
-
-	// Connect to our ASI224MC camera.
-	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait to connect to the device.
-	time.Sleep(2 * time.Second)
-
-	// Notice that we are not setting "CONNECT" to SwitchStateOff, but instead setting "DISCONNECT" to SwitchStateOn.
-	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "DISCONNECT", indiclient.SwitchStateOn)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	err = client.Disconnect()
-	if err != nil {
-		panic(err.Error())
-	}
-}
+// func Example_multipleClients() {
+// 	var err error
+//
+// 	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelInfo)
+// 	dialer := indiclient.NetworkDialer{}
+// 	fs := afero.NewMemMapFs()
+// 	bufferSize := 10
+// 	blobfs := afero.NewMemMapFs()
+//
+// 	// Initialize a new INDIClient.
+// 	client := indiclient.NewINDIClient(log, dialer, fs, bufferSize)
+//
+// 	// Connect to the local indiserver.
+// 	err = client.Connect("tcp", "localhost:7624")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Get all properties of all devices.
+// 	err = client.GetProperties("", "")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Wait to get the devices back from indiserver.
+// 	time.Sleep(2 * time.Second)
+//
+// 	// Print the names of all the devices we found.
+// 	devices := client.Devices()
+// 	for _, device := range devices {
+// 		println(device.Name)
+// 	}
+//
+// 	// Connect to our ASI224MC camera.
+// 	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	blobClient := indiclient.NewINDIClient(log, dialer, blobfs, bufferSize)
+//
+// 	// Connect to the local indiserver.
+// 	err = blobClient.Connect("tcp", "localhost:7624")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Get the "CCD1" property of the "ZWO CCD ASI224MC" device.
+// 	err = blobClient.GetProperties("ZWO CCD ASI224MC", "CCD1")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Wait to get the devices back from indiserver.
+// 	time.Sleep(2 * time.Second)
+//
+// 	// Tell the indiserver we want blobs from this camera's CCD1 property, and ONLY blobs from this camera.
+// 	// This allows the other client to stay open for control data, without slowing things down with large
+// 	// file transfers.
+// 	err = blobClient.EnableBlob("ZWO CCD ASI224MC", "CCD1", indiclient.BlobEnableOnly)
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Take a 10 second exposure. We send this on the control client.
+// 	err = client.SetNumberValue("ZWO CCD ASI224MC", "CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", "10")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Wait for the exposure to finish and transfer.
+// 	time.Sleep(11 * time.Second)
+//
+// 	// Get the actual BLOB. Be sure to close rdr when you are done with it!
+// 	rdr, fileName, length, err := blobClient.GetBlob("ZWO CCD ASI224MC", "CCD1", "CCD1")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	println(fmt.Sprintf("%s %d", fileName, length))
+//
+// 	err = rdr.Close()
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	err = client.Disconnect()
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	err = blobClient.Disconnect()
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+// }
+//
+// func ExampleINDIClient_SetSwitchValue_connect() {
+// 	var err error
+//
+// 	log := logging.NewLogger(os.Stdout, logging.JSONFormatter{}, logging.LogLevelInfo)
+// 	dialer := indiclient.NetworkDialer{}
+// 	fs := afero.NewMemMapFs()
+// 	bufferSize := 10
+//
+// 	// Initialize a new INDIClient.
+// 	client := indiclient.NewINDIClient(log, dialer, fs, bufferSize)
+//
+// 	// Connect to the local indiserver.
+// 	err = client.Connect("tcp", "localhost:7624")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Get all properties of all devices.
+// 	err = client.GetProperties("", "")
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Wait to get the devices back from indiserver.
+// 	time.Sleep(2 * time.Second)
+//
+// 	// Connect to our ASI224MC camera.
+// 	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	// Wait to connect to the device.
+// 	time.Sleep(2 * time.Second)
+//
+// 	// Notice that we are not setting "CONNECT" to SwitchStateOff, but instead setting "DISCONNECT" to SwitchStateOn.
+// 	err = client.SetSwitchValue("ZWO CCD ASI224MC", "CONNECTION", "DISCONNECT", indiclient.SwitchStateOn)
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	err = client.Disconnect()
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+// }

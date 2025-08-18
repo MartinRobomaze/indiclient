@@ -14,6 +14,7 @@ package indiclient
 // TODO: Handle device timeouts
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/xml"
 	"errors"
@@ -138,6 +139,28 @@ type INDIClient struct {
 
 	devices     sync.Map
 	blobStreams sync.Map
+	requests    map[string]chan interface{}
+
+	propsStatus propertiesStatus
+}
+
+type propertiesStatus struct {
+	updated bool
+	mu      sync.RWMutex
+}
+
+func (p *propertiesStatus) setStatus(status bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.updated = status
+}
+
+func (p *propertiesStatus) getUpdated() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.updated
 }
 
 // NewINDIClient creates a client to connect to an INDI server.
@@ -147,8 +170,13 @@ func NewINDIClient(log logging.Logger, dialer Dialer, fs afero.Fs, bufferSize in
 		dialer:      dialer,
 		devices:     sync.Map{},
 		blobStreams: sync.Map{},
+		requests:    make(map[string]chan interface{}),
 		fs:          fs,
 		bufferSize:  bufferSize,
+		propsStatus: propertiesStatus{
+			updated: false,
+			mu:      sync.RWMutex{},
+		},
 	}
 }
 
@@ -317,7 +345,7 @@ func (c *INDIClient) CloseBlobStream(deviceName, propName, blobName string, id s
 		writers := ws.(map[string]io.Writer)
 
 		if w, ok := writers[id]; ok {
-			w.(io.WriteCloser).Close()
+			_ = w.(io.WriteCloser).Close()
 
 			delete(writers, id)
 
@@ -346,6 +374,25 @@ func (c *INDIClient) GetProperties(deviceName, propName string) error {
 	return nil
 }
 
+func (c *INDIClient) WaitForPropsUpdateOrCancel(ctx context.Context) error {
+	t := time.NewTicker(500 * time.Millisecond)
+
+	<-t.C
+
+	for {
+		select {
+		case <-t.C:
+			if !c.propsStatus.getUpdated() {
+				return nil
+			}
+
+			c.propsStatus.setStatus(false)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // EnableBlob sends a command to the INDI server to enable/disable BLOBs for the current connection.
 // It is recommended to enable blobs on their own client, and keep the main connection clear of large transfers.
 // By default, BLOBs are NOT enabled.
@@ -371,7 +418,7 @@ func (c *INDIClient) EnableBlob(deviceName, propName string, val BlobEnable) err
 }
 
 // SetTextValue sends a command to the INDI server to change the value of a textVector.
-func (c *INDIClient) SetTextValue(deviceName, propName, textName, textValue string) error {
+func (c *INDIClient) SetTextValue(ctx context.Context, deviceName, propName, textName, textValue string) error {
 	device, err := c.findDevice(deviceName)
 	if err != nil {
 		return err
@@ -397,24 +444,47 @@ func (c *INDIClient) SetTextValue(deviceName, propName, textName, textValue stri
 
 	c.devices.Store(deviceName, device)
 
+	texts := []OneText{
+		{
+			Name:  textName,
+			Value: textValue,
+		},
+	}
 	cmd := NewTextVector{
 		Device: deviceName,
 		Name:   propName,
-		Texts: []OneText{
-			{
-				Name:  textName,
-				Value: textValue,
-			},
-		},
+		Texts:  texts,
 	}
 
+	respChan := make(chan interface{})
+
+	c.requests[propertyKey(deviceName, propName)] = respChan
 	c.write <- cmd
+
+	val, err := getValueOrCancel[*SetTextVector](ctx, respChan)
+	if err != nil {
+		return err
+	}
+
+	close(respChan)
+	delete(c.requests, propertyKey(deviceName, propName))
+
+	valid := false
+	for _, textVal := range val.Texts {
+		if textVal.Name == textName && strings.Trim(textVal.Value, "\n\t ") == textValue {
+			valid = true
+		}
+	}
+
+	if !valid {
+		return errors.New("invalid response")
+	}
 
 	return nil
 }
 
 // SetNumberValue sends a command to the INDI server to change the value of a numberVector.
-func (c *INDIClient) SetNumberValue(deviceName, propName, NumberName, NumberValue string) error {
+func (c *INDIClient) SetNumberValue(ctx context.Context, deviceName, propName, NumberName, NumberValue string) error {
 	device, err := c.findDevice(deviceName)
 	if err != nil {
 		return err
@@ -440,18 +510,42 @@ func (c *INDIClient) SetNumberValue(deviceName, propName, NumberName, NumberValu
 
 	c.devices.Store(deviceName, device)
 
-	cmd := NewNumberVector{
-		Device: deviceName,
-		Name:   propName,
-		Numbers: []OneNumber{
-			{
-				Name:  NumberName,
-				Value: NumberValue,
-			},
+	numbers := []OneNumber{
+		{
+			Name:  NumberName,
+			Value: NumberValue,
 		},
 	}
 
+	cmd := NewNumberVector{
+		Device:  deviceName,
+		Name:    propName,
+		Numbers: numbers,
+	}
+
+	respChan := make(chan interface{})
+
+	c.requests[propertyKey(deviceName, propName)] = respChan
 	c.write <- cmd
+
+	val, err := getValueOrCancel[*SetNumberVector](ctx, respChan)
+	if err != nil {
+		return err
+	}
+
+	close(respChan)
+	delete(c.requests, propertyKey(deviceName, propName))
+
+	valid := false
+	for _, numberVal := range val.Numbers {
+		if numberVal.Name == NumberName && strings.Trim(numberVal.Value, "\n\t ") == NumberValue {
+			valid = true
+		}
+	}
+
+	if !valid {
+		return errors.New("invalid response")
+	}
 
 	return nil
 }
@@ -459,7 +553,7 @@ func (c *INDIClient) SetNumberValue(deviceName, propName, NumberName, NumberValu
 // SetSwitchValue sends a command to the INDI server to change the value of a switchVector.
 // Note that you will ususally set the desired property on SwitchStateOn, and let the device
 // decide how to switch the other values off.
-func (c *INDIClient) SetSwitchValue(deviceName, propName, switchName string, switchValue SwitchState) error {
+func (c *INDIClient) SetSwitchValue(ctx context.Context, deviceName, propName, switchName string, switchValue SwitchState) error {
 	device, err := c.findDevice(deviceName)
 	if err != nil {
 		return err
@@ -485,24 +579,47 @@ func (c *INDIClient) SetSwitchValue(deviceName, propName, switchName string, swi
 
 	c.devices.Store(deviceName, device)
 
-	cmd := NewSwitchVector{
-		Device: deviceName,
-		Name:   propName,
-		Switches: []OneSwitch{
-			{
-				Name:  switchName,
-				Value: switchValue,
-			},
+	switches := []OneSwitch{
+		{
+			Name:  switchName,
+			Value: switchValue,
 		},
 	}
+	cmd := NewSwitchVector{
+		Device:   deviceName,
+		Name:     propName,
+		Switches: switches,
+	}
 
+	respChan := make(chan interface{})
+
+	c.requests[propertyKey(deviceName, propName)] = respChan
 	c.write <- cmd
+
+	val, err := getValueOrCancel[*SetSwitchVector](ctx, respChan)
+	if err != nil {
+		return err
+	}
+
+	close(respChan)
+	delete(c.requests, propertyKey(deviceName, propName))
+
+	valid := false
+	for _, switchVal := range val.Switches {
+		if switchVal.Name == switchName && strings.Trim(string(switchVal.Value), "\n\t ") == string(switchValue) {
+			valid = true
+		}
+	}
+
+	if !valid {
+		return errors.New("invalid response")
+	}
 
 	return nil
 }
 
 // SetBlobValue sends a command to the INDI server to change the value of a blobVector.
-func (c *INDIClient) SetBlobValue(deviceName, propName, blobName, blobValue, blobFormat string, blobSize int) error {
+func (c *INDIClient) SetBlobValue(ctx context.Context, deviceName, propName, blobName, blobValue, blobFormat string, blobSize int) error {
 	device, err := c.findDevice(deviceName)
 	if err != nil {
 		return err
@@ -541,7 +658,19 @@ func (c *INDIClient) SetBlobValue(deviceName, propName, blobName, blobValue, blo
 		},
 	}
 
+	respChan := make(chan interface{})
+
+	c.requests[propertyKey(deviceName, propName)] = respChan
 	c.write <- cmd
+
+	// Blobs are not compared because of their potential large size.
+	_, err = getValueOrCancel[*SetBlobVector](ctx, respChan)
+	if err != nil {
+		return err
+	}
+
+	close(respChan)
+	delete(c.requests, propertyKey(deviceName, propName))
 
 	return nil
 }
@@ -585,6 +714,20 @@ type indiMessageHandler interface {
 	delProperty(item *DelProperty)
 }
 
+func (c *INDIClient) setUpdated(value bool) {
+	c.propsStatus.mu.Lock()
+	defer c.propsStatus.mu.Unlock()
+
+	c.propsStatus.updated = value
+}
+
+func (c *INDIClient) GetUpdated() bool {
+	c.propsStatus.mu.RLock()
+	defer c.propsStatus.mu.RUnlock()
+
+	return c.propsStatus.updated
+}
+
 func (c *INDIClient) defTextVector(item *DefTextVector) {
 	device := c.findOrCreateDevice(item.Device)
 
@@ -617,6 +760,7 @@ func (c *INDIClient) defTextVector(item *DefTextVector) {
 	device.TextProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) defSwitchVector(item *DefSwitchVector) {
@@ -652,6 +796,7 @@ func (c *INDIClient) defSwitchVector(item *DefSwitchVector) {
 	device.SwitchProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) defNumberVector(item *DefNumberVector) {
@@ -690,6 +835,7 @@ func (c *INDIClient) defNumberVector(item *DefNumberVector) {
 	device.NumberProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) defLightVector(item *DefLightVector) {
@@ -723,6 +869,7 @@ func (c *INDIClient) defLightVector(item *DefLightVector) {
 	device.LightProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) defBlobVector(item *DefBlobVector) {
@@ -755,6 +902,7 @@ func (c *INDIClient) defBlobVector(item *DefBlobVector) {
 	device.BlobProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) setSwitchVector(item *SetSwitchVector) {
@@ -808,6 +956,12 @@ func (c *INDIClient) setSwitchVector(item *SetSwitchVector) {
 	device.SwitchProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+
+	c.propsStatus.setStatus(true)
+	switchChan, ok := c.requests[propertyKey(item.Device, item.Name)]
+	if ok {
+		switchChan <- item
+	}
 }
 
 func (c *INDIClient) setTextVector(item *SetTextVector) {
@@ -861,6 +1015,12 @@ func (c *INDIClient) setTextVector(item *SetTextVector) {
 	device.TextProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+
+	c.propsStatus.setStatus(true)
+	textChan, ok := c.requests[propertyKey(item.Device, item.Name)]
+	if ok {
+		textChan <- item
+	}
 }
 
 func (c *INDIClient) setNumberVector(item *SetNumberVector) {
@@ -914,6 +1074,12 @@ func (c *INDIClient) setNumberVector(item *SetNumberVector) {
 	device.NumberProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+
+	c.propsStatus.setStatus(true)
+	numberChan, ok := c.requests[propertyKey(item.Device, item.Name)]
+	if ok {
+		numberChan <- item
+	}
 }
 
 func (c *INDIClient) setLightVector(item *SetLightVector) {
@@ -966,6 +1132,7 @@ func (c *INDIClient) setLightVector(item *SetLightVector) {
 	device.LightProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) setBlobVector(item *SetBlobVector) {
@@ -1038,7 +1205,7 @@ func (c *INDIClient) setBlobVector(item *SetBlobVector) {
 		v.Value = f.Name()
 		v.Size = written
 
-		f.Close()
+		_ = f.Close()
 
 		prop.Values[val.Name] = v
 	}
@@ -1053,6 +1220,12 @@ func (c *INDIClient) setBlobVector(item *SetBlobVector) {
 	device.BlobProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
+
+	blobChan, ok := c.requests[propertyKey(item.Device, item.Name)]
+	if ok {
+		blobChan <- item
+	}
 }
 
 func (c *INDIClient) message(item *Message) {
@@ -1094,12 +1267,18 @@ func (c *INDIClient) delProperty(item *DelProperty) {
 	delete(device.BlobProperties, item.Name)
 
 	c.devices.Store(item.Device, device)
+	c.propsStatus.setStatus(true)
 }
 
 func (c *INDIClient) startRead() {
 	go func(r <-chan interface{}, log logging.Logger, handler indiMessageHandler) {
 		for i := range r {
-			log.WithField("item", i).Debug("got message")
+			switch i.(type) {
+			case *DefBlobVector:
+			case *SetBlobVector:
+			default:
+				log.WithField("item", i).Debug("got message")
+			}
 
 			switch item := i.(type) {
 			case *DefTextVector:
@@ -1147,7 +1326,7 @@ func (c *INDIClient) startRead() {
 				log.WithError(err).Warn("error in decoder.Token")
 
 				if err == io.EOF {
-					c.Disconnect()
+					_ = c.Disconnect()
 					return
 				}
 				continue
@@ -1226,4 +1405,21 @@ func (c *INDIClient) startWrite() {
 			}
 		}
 	}(c.conn, c.write, c.log)
+}
+
+func getValueOrCancel[T any](ctx context.Context, value chan any) (T, error) {
+	select {
+	case val := <-value:
+		if v, ok := val.(T); ok {
+			return v, nil
+		}
+
+		return *new(T), errors.New("invalid value from channel")
+	case <-ctx.Done():
+		return *new(T), ctx.Err()
+	}
+}
+
+func propertyKey(deviceName string, propertyName string) string {
+	return deviceName + "." + propertyName
 }
