@@ -22,6 +22,20 @@ type MessageJSON struct {
 	Message   string    `json:"message"`
 }
 
+type PropertyType int64
+
+const (
+	PropertyTypeText PropertyType = iota
+	PropertyTypeSwitch
+	PropertyTypeNumber
+	PropertyTypeBlob
+	PropertyTypeLight
+)
+
+type Property interface {
+	PropertyType() PropertyType
+}
+
 // TextProperty is a text property on a device.
 type TextProperty struct {
 	Name        string               `json:"name"`
@@ -33,6 +47,10 @@ type TextProperty struct {
 	Messages    []MessageJSON        `json:"messages"`
 	Permissions PropertyPermission   `json:"permissions"`
 	Values      map[string]TextValue `json:"values"`
+}
+
+func (t *TextProperty) PropertyType() PropertyType {
+	return PropertyTypeText
 }
 
 // TextValue is a text value on a TextProperty.
@@ -56,6 +74,10 @@ type SwitchProperty struct {
 	Values      map[string]SwitchValue `json:"values"`
 }
 
+func (s *SwitchProperty) PropertyType() PropertyType {
+	return PropertyTypeSwitch
+}
+
 // SwitchValue is a switch value on a SwitchProperty.
 type SwitchValue struct {
 	Name  string      `json:"name"`
@@ -74,6 +96,10 @@ type NumberProperty struct {
 	Messages    []MessageJSON          `json:"messages"`
 	Permissions PropertyPermission     `json:"permissions"`
 	Values      map[string]NumberValue `json:"values"`
+}
+
+func (n *NumberProperty) PropertyType() PropertyType {
+	return PropertyTypeNumber
 }
 
 // NumberValue is a number value on a NumberProperty.
@@ -98,6 +124,10 @@ type LightProperty struct {
 	Values      map[string]LightValue `json:"values"`
 }
 
+func (l *LightProperty) PropertyType() PropertyType {
+	return PropertyTypeLight
+}
+
 // LightValue is a light value on a LightProperty.
 type LightValue struct {
 	Name  string        `json:"name"`
@@ -116,6 +146,10 @@ type BlobProperty struct {
 	Permissions PropertyPermission   `json:"permissions"`
 	Timeout     int                  `json:"timeout"`
 	Values      map[string]BlobValue `json:"values"`
+}
+
+func (b *BlobProperty) PropertyType() PropertyType {
+	return PropertyTypeBlob
 }
 
 // BlobValue is a blob value on a BlobProperty.

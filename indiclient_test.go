@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goastro/indiclient/device"
 	"github.com/rickbassham/logging"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -536,55 +537,18 @@ func TestExample_singleClient_Test(t *testing.T) {
 		println(device.Name)
 	}
 
-	// Connect to our ASI224MC camera.
-	err = client.SetSwitchValue(ctx, devices[0].Name, "CONNECTION", "CONNECT", indiclient.SwitchStateOn)
-	if err != nil {
-		panic(err.Error())
-	}
+	cam := device.NewCameraDevice(client, "CCD Simulator")
+	err = cam.Connect(ctx)
+	require.NoError(t, err)
 
-	err = client.GetProperties("", "")
-	if err != nil {
-		panic(err.Error())
-	}
+	err = cam.SetGain(ctx, 100.0)
+	require.NoError(t, err)
 
-	err = client.WaitForPropsUpdateOrCancel(ctx)
-	if err != nil {
-		panic(err.Error())
-	}
+	rdr, length, err := cam.Expose(ctx, 10.0)
+	require.NoError(t, err)
 
-	// Print the names of all the devices we found.
-	devices = client.Devices()
-	for _, device := range devices {
-		println(device.Name)
-	}
-
-	// Tell the indiserver we want blobs from this camera's CCD1 property.
-	err = client.EnableBlob(devices[0].Name, "CCD1", indiclient.BlobEnableAlso)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Take a 10 second exposure.
-	err = client.SetNumberValue(ctx, devices[0].Name, "CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", "10")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	// Wait for the exposure to finish and transfer.
-	time.Sleep(11 * time.Second)
-
-	// Get the actual BLOB. Be sure to close rdr when you are done with it!
-	rdr, fileName, length, err := client.GetBlob(devices[0].Name, "CCD1", "CCD1")
-	if err != nil {
-		panic(err.Error())
-	}
-
-	println(fmt.Sprintf("%s %d", fileName, length))
-
-	err = rdr.Close()
-	if err != nil {
-		panic(err.Error())
-	}
+	fmt.Println(rdr, length)
+	rdr.Close()
 }
 
 // func Example_multipleClients() {

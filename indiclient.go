@@ -141,6 +141,8 @@ type INDIClient struct {
 	blobStreams sync.Map
 	requests    map[string]chan interface{}
 
+	propertyHandlers sync.Map
+
 	propsStatus propertiesStatus
 }
 
@@ -235,6 +237,16 @@ func (c *INDIClient) IsConnected() bool {
 	return false
 }
 
+type PropertyUpdatedHandler func(property Property)
+
+func (c *INDIClient) RegisterPropertyUpdatedHandler(deviceName, propertyName string, handler PropertyUpdatedHandler) {
+	c.propertyHandlers.Store(fmt.Sprintf("%s-%s", deviceName, propertyName), handler)
+}
+
+func (c *INDIClient) RemovePropertyUpdatedHandler(deviceName, propertyName string) {
+	c.propertyHandlers.Delete(fmt.Sprintf("%s-%s", deviceName, propertyName))
+}
+
 // Devices returns the current list of INDI devices with their current state.
 func (c *INDIClient) Devices() []Device {
 	devices := []Device{}
@@ -246,6 +258,15 @@ func (c *INDIClient) Devices() []Device {
 	})
 
 	return devices
+}
+
+func (c *INDIClient) Device(name string) (Device, bool) {
+	dev, ok := c.devices.Load(name)
+	if !ok {
+		return Device{}, false
+	}
+
+	return dev.(Device), true
 }
 
 // GetBlob finds a BLOB with the given deviceName, propName, blobName. Be sure to close rdr when you are done with it.
@@ -685,7 +706,7 @@ func (c *INDIClient) findDevice(name string) (Device, error) {
 
 func (c *INDIClient) findOrCreateDevice(name string) Device {
 	device, err := c.findDevice(name)
-	if err == ErrDeviceNotFound {
+	if errors.Is(err, ErrDeviceNotFound) {
 		device = Device{
 			Name:             name,
 			TextProperties:   map[string]TextProperty{},
@@ -757,6 +778,12 @@ func (c *INDIClient) defTextVector(item *DefTextVector) {
 		})
 	}
 
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
+	}
+
 	device.TextProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
@@ -791,6 +818,12 @@ func (c *INDIClient) defSwitchVector(item *DefSwitchVector) {
 			Message:   item.Message,
 			Timestamp: time.Now(),
 		})
+	}
+
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
 	}
 
 	device.SwitchProperties[item.Name] = prop
@@ -832,6 +865,12 @@ func (c *INDIClient) defNumberVector(item *DefNumberVector) {
 		})
 	}
 
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
+	}
+
 	device.NumberProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
@@ -866,6 +905,12 @@ func (c *INDIClient) defLightVector(item *DefLightVector) {
 		})
 	}
 
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
+	}
+
 	device.LightProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
@@ -897,6 +942,12 @@ func (c *INDIClient) defBlobVector(item *DefBlobVector) {
 			Message:   item.Message,
 			Timestamp: time.Now(),
 		})
+	}
+
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
 	}
 
 	device.BlobProperties[item.Name] = prop
@@ -951,6 +1002,12 @@ func (c *INDIClient) setSwitchVector(item *SetSwitchVector) {
 			Message:   item.Message,
 			Timestamp: time.Now(),
 		})
+	}
+
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
 	}
 
 	device.SwitchProperties[item.Name] = prop
@@ -1012,6 +1069,12 @@ func (c *INDIClient) setTextVector(item *SetTextVector) {
 		})
 	}
 
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
+	}
+
 	device.TextProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
@@ -1071,6 +1134,12 @@ func (c *INDIClient) setNumberVector(item *SetNumberVector) {
 		})
 	}
 
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
+	}
+
 	device.NumberProperties[item.Name] = prop
 
 	c.devices.Store(item.Device, device)
@@ -1127,6 +1196,12 @@ func (c *INDIClient) setLightVector(item *SetLightVector) {
 			Message:   item.Message,
 			Timestamp: time.Now(),
 		})
+	}
+
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
 	}
 
 	device.LightProperties[item.Name] = prop
@@ -1215,6 +1290,12 @@ func (c *INDIClient) setBlobVector(item *SetBlobVector) {
 			Message:   item.Message,
 			Timestamp: time.Now(),
 		})
+	}
+
+	handler, ok := c.propertyHandlers.Load(fmt.Sprintf("%s-%s", item.Device, item.Name))
+	if ok {
+		h := handler.(PropertyUpdatedHandler)
+		go h(&prop)
 	}
 
 	device.BlobProperties[item.Name] = prop
