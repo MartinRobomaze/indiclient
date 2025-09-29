@@ -191,18 +191,18 @@ type ImageResult struct {
 	Stream   io.ReadCloser
 	Filename string
 	Length   int64
+	Error    error
 }
 
-func (c *CameraDevice) ExposeAsync(ctx context.Context, exposureTime float64) (<-chan ImageResult, <-chan error) {
+func (c *CameraDevice) ExposeAsync(ctx context.Context, exposureTime float64) <-chan ImageResult {
 	imgRes := make(chan ImageResult)
-	errChan := make(chan error)
 	err := c.indiClient.SetNumberValue(
 		ctx, c.deviceName, PropertyCcdExposure, ValueCcdExposureName, strconv.FormatFloat(exposureTime, 'f', -1, 64))
 	if err != nil {
 		go func() {
-			errChan <- err
+			imgRes <- ImageResult{Error: fmt.Errorf("error setting camera exposure: %w", err)}
 		}()
-		return imgRes, errChan
+		return imgRes
 	}
 
 	go func() {
@@ -222,20 +222,20 @@ func (c *CameraDevice) ExposeAsync(ctx context.Context, exposureTime float64) (<
 		case <-done:
 		case <-ctx.Done():
 		case <-time.After(time.Duration(exposureTime)*time.Second + 10*time.Second):
-			errChan <- fmt.Errorf("timed out waiting for camera to exposure")
+			imgRes <- ImageResult{Error: fmt.Errorf("timed out waiting for camera to exposure")}
 			return
 		}
 
 		c.indiClient.RemovePropertyUpdatedHandler(c.deviceName, PropertyConnection)
 
 		if ctx.Err() != nil {
-			errChan <- ctx.Err()
+			imgRes <- ImageResult{Error: fmt.Errorf("timed out waiting for camera to exposure")}
 			return
 		}
 
 		rdr, filename, length, err := c.indiClient.GetBlob(c.deviceName, "CCD1", "CCD1")
 		if err != nil {
-			errChan <- fmt.Errorf("error loading camera properties: %w", err)
+			imgRes <- ImageResult{Error: fmt.Errorf("error loading camera properties: %w", err)}
 			return
 		}
 
@@ -246,7 +246,7 @@ func (c *CameraDevice) ExposeAsync(ctx context.Context, exposureTime float64) (<
 		}
 	}()
 
-	return imgRes, errChan
+	return imgRes
 }
 
 func getAndParseNumberValue[T int | float64](values map[string]indiclient.NumberValue, propertyName string) (T, error) {

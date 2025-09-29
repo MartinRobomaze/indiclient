@@ -544,10 +544,17 @@ func TestExample_singleClient_Test(t *testing.T) {
 	err = cam.SetGain(ctx, 100.0)
 	require.NoError(t, err)
 
-	rdr, length, err := cam.Expose(ctx, 10.0)
+	rdr, _, length, err := cam.Expose(ctx, 10.0)
 	require.NoError(t, err)
 
 	fmt.Println(rdr, length)
+	rdr.Close()
+
+	resChan := cam.ExposeAsync(ctx, 10.0)
+	res := <-resChan
+	require.NoError(t, res.Error)
+
+	fmt.Println(res.Stream, length)
 	rdr.Close()
 }
 
